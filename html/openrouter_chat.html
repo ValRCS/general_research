@@ -42,7 +42,7 @@
       background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 10px 0;
     }
     .role { text-transform: uppercase; letter-spacing: .03em; color: #556; font-weight: 600; font-size: 12px; }
-    .content { white-space: pre-wrap; overflow-x: auto; }
+    .content { overflow-x: auto; }
     .assistant { border-left: 4px solid var(--assist); }
     .user { border-left: 4px solid var(--user); }
     .system { border-left: 4px solid var(--sys); background: #fafafa; }
@@ -58,6 +58,24 @@
     .warn { background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 8px 10px; border-radius: 8px; margin-top: 8px; }
     button.small { padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); cursor: pointer; }
     button.small:disabled { opacity: .6; cursor: not-allowed; }
+
+    /* Markdown presentation */
+    .content.md { white-space: normal; }
+    .content.md h1, .content.md h2, .content.md h3,
+    .content.md h4, .content.md h5, .content.md h6 { margin: 0 0 8px; }
+    .content.md p { margin: 0 0 8px; }
+    .content.md ul, .content.md ol { margin: 0 0 8px 22px; padding: 0; }
+    .content.md li { margin: 2px 0; }
+    .content.md code {
+      background: #f2f4f7; border: 1px solid #e6e9ef; border-radius: 4px;
+      padding: 0 3px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 0.95em;
+    }
+    .content.md pre {
+      background: #f6f8fa; border: 1px solid #e3e6ea; border-radius: 8px; padding: 10px; overflow: auto; margin: 8px 0;
+    }
+    .content.md pre code { background: transparent; border: 0; padding: 0; }
+    .content.md a { color: #1a73e8; text-decoration: none; }
+    .content.md a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -69,6 +87,7 @@
     <label><input type="checkbox" id="showTools"> Show tool/function</label>
     <label><input type="checkbox" id="showMeta"> Show model/meta</label>
     <label><input type="checkbox" id="wrapLong" checked> Wrap long lines</label>
+    <label><input type="checkbox" id="renderMd" checked> Render Markdown</label>
     <button class="small" id="exportMd" disabled>Export Markdown</button>
   </div>
 </header>
@@ -88,6 +107,7 @@
   const showTools  = document.getElementById('showTools');
   const showMeta   = document.getElementById('showMeta');
   const wrapLong   = document.getElementById('wrapLong');
+  const renderMd   = document.getElementById('renderMd');
   const exportMd   = document.getElementById('exportMd');
 
   drop.addEventListener('click', () => fileInput.click());
@@ -101,7 +121,7 @@
   }));
   drop.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
 
-  [showSystem, showTools, showMeta, wrapLong].forEach(cb => cb.addEventListener('change', render));
+  [showSystem, showTools, showMeta, wrapLong, renderMd].forEach(cb => cb.addEventListener('change', render));
   exportMd.addEventListener('click', () => downloadMarkdown());
 
   let parsed;
@@ -126,21 +146,17 @@
   function normalizeContent(content) {
     if (typeof content === 'string') return content;
 
-    // Array of parts (OpenAI/Anthropic style)
     if (Array.isArray(content)) {
       return content.map(part => {
         if (typeof part === 'string') return part;
         if (!part || typeof part !== 'object') return String(part ?? '');
-        // Text shape variants
         if (part.text && typeof part.text === 'string') return part.text;
         if (part.text && typeof part.text === 'object') return part.text.value ?? part.text.content ?? '';
         if (part.type === 'text') return part.text ?? part.content ?? '';
-        // Images (render as placeholder line)
         if (['image', 'input_image', 'image_url'].includes(part.type)) {
           const url = part.image_url?.url || part.url || part.source?.data || '';
           return `[image] ${typeof url === 'string' ? url.slice(0, 200) : ''}`;
         }
-        // Tool use / results
         if (part.type === 'tool_use' || part.type === 'tool_result') {
           const name = part.name || part.tool_name || '';
           return `[${part.type}] ${name}`.trim();
@@ -149,7 +165,6 @@
       }).join('\n');
     }
 
-    // Object with common text nesting
     if (content && typeof content === 'object') {
       const candidates = [
         content.text,
@@ -189,14 +204,14 @@
     return extras.join('\n');
   }
 
-  // Detect ORPG 2.0 style export (OpenRouter Playground / Chat)
+  // Detect ORPG 2.0 export
   function isORPG(root) {
     return root && typeof root === 'object'
       && root.messages && !Array.isArray(root.messages)
       && (root.version?.toLowerCase?.().startsWith('orpg') || root.characters);
   }
 
-  // Convert ORPG export into normalized conversations (one per root->leaf branch)
+  // ORPG extractor (one conversation per root->leaf branch)
   function extractConversationsORPG(root) {
     const chars = root.characters || {};
     const msgMap = root.messages || {};
@@ -211,10 +226,8 @@
       const pid = m.parentMessageId;
       if (pid) (children[pid] ||= []).push(m);
     });
-    // Sort children by time
     Object.values(children).forEach(arr => arr.sort((a,b) => toTime(a) - toTime(b)));
 
-    // Roots: no parent or missing parent
     const roots = msgs.filter(m => !m.parentMessageId || !byId[m.parentMessageId]);
     roots.sort((a,b) => toTime(a) - toTime(b));
 
@@ -252,7 +265,6 @@
       const kids = children[node.id] || [];
       if (!kids.length) {
         const normalized = path.map(norm);
-        // Title: root title plus assistant model on this branch
         const lastAsst = [...path].reverse().find(mm => (mm.type || '').toLowerCase() === 'assistant' && mm.characterId);
         const modelTitle = lastAsst ? modelFromCharId(lastAsst.characterId) : '';
         const base = root.title || '';
@@ -264,7 +276,6 @@
     }
 
     roots.forEach(r => dfs(r, [r]));
-    // If no branches (rare), produce a single conversation with all messages sorted by time
     if (!convs.length) {
       const ordered = msgs.slice().sort((a,b) => toTime(a) - toTime(b)).map(norm);
       const title = root.title || (ordered[ordered.length-1]?.model || '');
@@ -273,7 +284,7 @@
     return convs;
   }
 
-  // Generic extractor for other schemas
+  // Generic extractor
   function extractConversationsGeneric(root) {
     const convs = [];
 
@@ -316,7 +327,6 @@
           }
         });
       } else {
-        // deep search
         const stack = [root];
         const seen = new Set();
         while (stack.length) {
@@ -402,11 +412,16 @@
         if (ht) metaBits.push(`time: ${ht}`);
 
         const pills = metaBits.map(x => `<span class="pill">${escapeHtml(x)}</span>`).join(' ');
+
+        const isMd = renderMd.checked;
+        const contentHtml = isMd ? mdToHtmlSafe(text || '') : escapeHtml(text || '');
+        const contentStyle = isMd ? '' : ` style="white-space:${wrapLong.checked ? 'pre-wrap' : 'pre'}"`;
+
         return `
           <div class="${cls}">
             <div class="role">${escapeHtml(role)}</div>
             <div class="body">
-              <div class="content" style="white-space:${wrapLong.checked?'pre-wrap':'pre'}">${escapeHtml(text || '')}</div>
+              <div class="content ${isMd ? 'md' : ''}"${contentStyle}>${contentHtml}</div>
               <div class="meta ${showMeta.checked ? '' : 'hidden'}" style="margin-top:6px">${pills}</div>
             </div>
           </div>
@@ -429,6 +444,85 @@
       .replaceAll('&','&amp;')
       .replaceAll('<','&lt;')
       .replaceAll('>','&gt;');
+  }
+
+  // Minimal, safe Markdown renderer (headings, lists, code, links, emphasis).
+  function mdToHtmlSafe(src) {
+    if (!src) return '';
+    // Normalize newlines
+    let s = String(src).replace(/\r\n?/g, '\n');
+
+    // Escape HTML first (we'll only add safe tags below)
+    s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Fenced code blocks ```lang\n...\n```
+    s = s.replace(/```(?:[^\n]*)\n([\s\S]*?)```/g, (m, code) => `<pre><code>${code}</code></pre>`);
+
+    // Headings
+    s = s.replace(/^###### (.*)$/gm, '<h6>$1</h6>')
+         .replace(/^##### (.*)$/gm, '<h5>$1</h5>')
+         .replace(/^#### (.*)$/gm, '<h4>$1</h4>')
+         .replace(/^### (.*)$/gm, '<h3>$1</h3>')
+         .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+         .replace(/^# (.*)$/gm, '<h1>$1</h1>');
+
+    // Horizontal rules
+    s = s.replace(/^\s*([-*_])\1\1[\1\s]*$/gm, '<hr>');
+
+    // Lists (simple, single-level)
+    s = listify(s);
+
+    // Inline code
+    s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+    // Bold, italic
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+         .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+         .replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+         .replace(/(^|[^_])_([^_\n]+)_(?!_)/g, '$1<em>$2</em>');
+
+    // Links
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, url) => {
+      const safeUrl = url.replace(/"/g, '&quot;');
+      return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+    });
+
+    // Paragraphs (convert loose text blocks to <p>, keep existing blocks as-is)
+    s = s.split(/\n{2,}/).map(block => {
+      const trimmed = block.trim();
+      if (!trimmed) return '';
+      if (/^<(h\d|ul|ol|pre|hr|blockquote)/.test(trimmed)) return trimmed;
+      if (trimmed.includes('<li>')) return trimmed; // list blocks already wrapped
+      return `<p>${trimmed.replace(/\n/g, '<br>')}</p>`;
+    }).join('\n');
+
+    return s;
+  }
+
+  function listify(s) {
+    const lines = s.split('\n');
+    const out = [];
+    let inUl = false, inOl = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      let m;
+      if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        if (!inUl) { out.push('<ul>'); inUl = true; }
+        out.push(`<li>${m[1]}</li>`);
+      } else if ((m = line.match(/^\s*\d+\.\s+(.*)$/))) {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (!inOl) { out.push('<ol>'); inOl = true; }
+        out.push(`<li>${m[1]}</li>`);
+      } else {
+        if (inUl) { out.push('</ul>'); inUl = false; }
+        if (inOl) { out.push('</ol>'); inOl = false; }
+        out.push(line);
+      }
+    }
+    if (inUl) out.push('</ul>');
+    if (inOl) out.push('</ol>');
+    return out.join('\n');
   }
 
   function toMarkdown() {
@@ -465,7 +559,6 @@
     URL.revokeObjectURL(url);
   }
 
-  // Initial state
   out.innerHTML = '<div class="warn">Drop an export JSON to render.</div>';
 })();
 </script>
