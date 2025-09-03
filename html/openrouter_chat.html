@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenRouter Chat Viewer (local)</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --border: #e3e6ea;
+      --muted: #666;
+      --pill-bg: #eef2f7;
+      --pill-border: #e0e6ef;
+      --assist: #5b8def;
+      --user: #34a853;
+      --sys: #999;
+      --tool: #b36bff;
+      --warn-bg: #fff3cd;
+      --warn-border: #ffe08a;
+      --txt: #111;
+    }
+    html, body { height: 100%; }
+    body {
+      font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif;
+      margin: 0; background: var(--bg); color: var(--txt);
+    }
+    header {
+      padding: 12px 16px; background: var(--card); border-bottom: 1px solid var(--border);
+      display: flex; gap: 12px; align-items: center; position: sticky; top: 0; z-index: 10;
+      flex-wrap: wrap;
+    }
+    .drop {
+      border: 2px dashed #cfd6df; padding: 14px 16px; border-radius: 8px; background: #fff; cursor: copy;
+      min-width: 260px; user-select: none;
+    }
+    main { padding: 16px; max-width: 980px; margin: 0 auto; }
+    .conv { margin: 16px 0 28px; }
+    .title { font-weight: 600; margin: 0 0 6px; color: #333; }
+    .msg {
+      display: grid; grid-template-columns: 110px 1fr; gap: 12px;
+      background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin: 10px 0;
+    }
+    .role { text-transform: uppercase; letter-spacing: .03em; color: #556; font-weight: 600; font-size: 12px; }
+    .content { white-space: pre-wrap; overflow-x: auto; }
+    .assistant { border-left: 4px solid var(--assist); }
+    .user { border-left: 4px solid var(--user); }
+    .system { border-left: 4px solid var(--sys); background: #fafafa; }
+    .tool, .function { border-left: 4px solid var(--tool); background: #fbf7ff; }
+    .meta { color: var(--muted); font-size: 12px; }
+    .pill {
+      display: inline-block; padding: 2px 6px; border-radius: 999px; background: var(--pill-bg);
+      border: 1px solid var(--pill-border); margin-right: 6px; font-size: 12px;
+    }
+    .hidden { display: none; }
+    .controls { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    label { display: inline-flex; gap: 6px; align-items: center; }
+    .warn { background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 8px 10px; border-radius: 8px; margin-top: 8px; }
+    button.small { padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); cursor: pointer; }
+    button.small:disabled { opacity: .6; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="drop" id="drop">Drop OpenRouter JSON here (or click to choose)</div>
+  <div class="controls">
+    <label><input type="checkbox" id="showSystem"> Show system</label>
+    <label><input type="checkbox" id="showTools"> Show tool/function</label>
+    <label><input type="checkbox" id="showMeta"> Show model/meta</label>
+    <label><input type="checkbox" id="wrapLong" checked> Wrap long lines</label>
+    <button class="small" id="exportMd" disabled>Export Markdown</button>
+  </div>
+</header>
+
+<main id="out">
+  <div class="warn">This is a local viewer. No data is uploaded.</div>
+</main>
+
+<input type="file" id="file" accept="application/json" hidden>
+
+<script>
+(function(){
+  const drop = document.getElementById('drop');
+  const fileInput = document.getElementById('file');
+  const out = document.getElementById('out');
+  const showSystem = document.getElementById('showSystem');
+  const showTools  = document.getElementById('showTools');
+  const showMeta   = document.getElementById('showMeta');
+  const wrapLong   = document.getElementById('wrapLong');
+  const exportMd   = document.getElementById('exportMd');
+
+  drop.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+  ['dragover','dragenter'].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation(); drop.style.background = '#f0f4ff';
+  }));
+  ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation(); drop.style.background = '#fff';
+  }));
+  drop.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
+
+  [showSystem, showTools, showMeta, wrapLong].forEach(cb => cb.addEventListener('change', render));
+  exportMd.addEventListener('click', () => downloadMarkdown());
+
+  let parsed;
+
+  function handleFiles(files) {
+    if (!files || !files.length) return;
+    const f = files[0];
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        parsed = JSON.parse(reader.result);
+        exportMd.disabled = false;
+        render();
+      } catch (err) {
+        out.innerHTML = '<div class="warn">Failed to parse JSON: ' + escapeHtml(err.message) + '</div>';
+        exportMd.disabled = true;
+      }
+    };
+    reader.readAsText(f);
+  }
+
+  function normalizeContent(content) {
+    if (typeof content === 'string') return content;
+
+    // Array of parts (OpenAI/Anthropic style)
+    if (Array.isArray(content)) {
+      return content.map(part => {
+        if (typeof part === 'string') return part;
+        if (!part || typeof part !== 'object') return String(part ?? '');
+        // Text shape variants
+        if (part.text && typeof part.text === 'string') return part.text;
+        if (part.text && typeof part.text === 'object') return part.text.value ?? part.text.content ?? '';
+        if (part.type === 'text') return part.text ?? part.content ?? '';
+        // Images (render as placeholder line)
+        if (['image', 'input_image', 'image_url'].includes(part.type)) {
+          const url = part.image_url?.url || part.url || part.source?.data || '';
+          return `[image] ${typeof url === 'string' ? url.slice(0, 200) : ''}`;
+        }
+        // Tool use / results
+        if (part.type === 'tool_use' || part.type === 'tool_result') {
+          const name = part.name || part.tool_name || '';
+          return `[${part.type}] ${name}`.trim();
+        }
+        try { return JSON.stringify(part); } catch { return String(part); }
+      }).join('\n');
+    }
+
+    // Object with common text nesting
+    if (content && typeof content === 'object') {
+      const candidates = [
+        content.text,
+        content.message?.content,
+        content.content?.text,
+        content[0]?.text
+      ];
+      for (const c of candidates) {
+        if (typeof c === 'string') return c;
+        if (Array.isArray(c)) return normalizeContent(c);
+      }
+      try { return JSON.stringify(content, null, 2); } catch { return String(content); }
+    }
+
+    return '';
+  }
+
+  function formatAssistantCalls(m) {
+    const extras = [];
+    if (Array.isArray(m.tool_calls)) {
+      m.tool_calls.forEach(tc => {
+        const fn = tc.function || tc.fn;
+        const name = fn?.name || tc.name || 'tool';
+        let args = '';
+        try { args = fn?.arguments ? JSON.stringify(JSON.parse(fn.arguments), null, 0) : (fn?.args ? JSON.stringify(fn.args) : ''); }
+        catch { args = fn?.arguments || ''; }
+        extras.push(`[tool_call] ${name}${args ? ' ' + args : ''}`);
+      });
+    }
+    if (m.function_call) {
+      const fn = m.function_call;
+      let args = '';
+      try { args = fn.arguments ? JSON.stringify(JSON.parse(fn.arguments), null, 0) : ''; }
+      catch { args = fn.arguments || ''; }
+      extras.push(`[function_call] ${fn.name || 'function'}${args ? ' ' + args : ''}`);
+    }
+    return extras.join('\n');
+  }
+
+  // Detect ORPG 2.0 style export (OpenRouter Playground / Chat)
+  function isORPG(root) {
+    return root && typeof root === 'object'
+      && root.messages && !Array.isArray(root.messages)
+      && (root.version?.toLowerCase?.().startsWith('orpg') || root.characters);
+  }
+
+  // Convert ORPG export into normalized conversations (one per root->leaf branch)
+  function extractConversationsORPG(root) {
+    const chars = root.characters || {};
+    const msgMap = root.messages || {};
+    const msgs = Object.values(msgMap);
+    if (!msgs.length) return [];
+
+    const byId = {};
+    msgs.forEach(m => { if (m && m.id) byId[m.id] = m; });
+
+    const children = {};
+    msgs.forEach(m => {
+      const pid = m.parentMessageId;
+      if (pid) (children[pid] ||= []).push(m);
+    });
+    // Sort children by time
+    Object.values(children).forEach(arr => arr.sort((a,b) => toTime(a) - toTime(b)));
+
+    // Roots: no parent or missing parent
+    const roots = msgs.filter(m => !m.parentMessageId || !byId[m.parentMessageId]);
+    roots.sort((a,b) => toTime(a) - toTime(b));
+
+    function toTime(m) {
+      const t = m?.createdAt || m?.updatedAt;
+      const d = t ? new Date(t) : new Date(0);
+      return isNaN(d.getTime()) ? 0 : d.getTime();
+    }
+
+    function modelFromCharId(charId) {
+      const c = charId && chars[charId];
+      if (!c) return '';
+      return c.modelInfo?.short_name || c.modelInfo?.name || c.model || c.id || '';
+    }
+
+    function norm(m) {
+      const type = (m.type || '').toLowerCase();
+      const role = type === 'assistant' ? 'assistant'
+                : type === 'user' ? 'user'
+                : type === 'system' ? 'system'
+                : (m.role || 'assistant').toLowerCase();
+      const model = role === 'assistant' ? modelFromCharId(m.characterId) : '';
+      return {
+        id: m.id,
+        role,
+        content: normalizeContent(m.content ?? ''),
+        model,
+        name: role === 'user' && m.characterId && m.characterId !== 'USER' ? m.characterId : undefined,
+        created: m.createdAt || m.updatedAt || undefined
+      };
+    }
+
+    const convs = [];
+    function dfs(node, path) {
+      const kids = children[node.id] || [];
+      if (!kids.length) {
+        const normalized = path.map(norm);
+        // Title: root title plus assistant model on this branch
+        const lastAsst = [...path].reverse().find(mm => (mm.type || '').toLowerCase() === 'assistant' && mm.characterId);
+        const modelTitle = lastAsst ? modelFromCharId(lastAsst.characterId) : '';
+        const base = root.title || '';
+        const title = [base, modelTitle].filter(Boolean).join(' — ');
+        convs.push({ title, messages: normalized });
+        return;
+      }
+      kids.forEach(child => dfs(child, path.concat([child])));
+    }
+
+    roots.forEach(r => dfs(r, [r]));
+    // If no branches (rare), produce a single conversation with all messages sorted by time
+    if (!convs.length) {
+      const ordered = msgs.slice().sort((a,b) => toTime(a) - toTime(b)).map(norm);
+      const title = root.title || (ordered[ordered.length-1]?.model || '');
+      convs.push({ title, messages: ordered });
+    }
+    return convs;
+  }
+
+  // Generic extractor for other schemas
+  function extractConversationsGeneric(root) {
+    const convs = [];
+
+    function looksLikeMessage(x) {
+      return x && typeof x === 'object' && ('role' in x || 'type' in x) && 'content' in x;
+    }
+    function toRole(m) {
+      return (m.role || m.type || 'assistant').toLowerCase();
+    }
+    function looksLikeMessagesArray(arr) {
+      return Array.isArray(arr) && arr.some(looksLikeMessage);
+    }
+
+    if (Array.isArray(root)) {
+      if (root.some(looksLikeMessage)) {
+        convs.push({ title: '', messages: root.map(m => normalizeMsg(m)) });
+      } else {
+        root.forEach((c, i) => {
+          if (!c || typeof c !== 'object') return;
+          const msgs = c.messages || c.chat || c.log || c.thread;
+          if (looksLikeMessagesArray(msgs)) {
+            convs.push({ title: c.title || c.name || c.id || `Conversation ${i+1}`, messages: msgs.map(m => normalizeMsg(m)) });
+          }
+        });
+      }
+    } else if (root && typeof root === 'object') {
+      if (looksLikeMessagesArray(root.messages)) {
+        convs.push({ title: root.title || root.id || '', messages: root.messages.map(m => normalizeMsg(m)) });
+      } else if (Array.isArray(root.conversations)) {
+        root.conversations.forEach((c, i) => {
+          if (looksLikeMessagesArray(c?.messages)) {
+            convs.push({ title: c.title || c.id || `Conversation ${i+1}`, messages: c.messages.map(m => normalizeMsg(m)) });
+          }
+        });
+      } else if (Array.isArray(root.data)) {
+        root.data.forEach((c, i) => {
+          const msgs = c?.messages || c?.chat || c?.log;
+          if (looksLikeMessagesArray(msgs)) {
+            convs.push({ title: c.title || c.id || `Conversation ${i+1}`, messages: msgs.map(m => normalizeMsg(m)) });
+          }
+        });
+      } else {
+        // deep search
+        const stack = [root];
+        const seen = new Set();
+        while (stack.length) {
+          const cur = stack.pop();
+          if (!cur || typeof cur !== 'object') continue;
+          if (seen.has(cur)) continue;
+          seen.add(cur);
+          if (Array.isArray(cur)) {
+            cur.forEach(v => stack.push(v));
+          } else {
+            for (const [k, v] of Object.entries(cur)) {
+              if (looksLikeMessagesArray(v)) {
+                convs.push({ title: cur.title || cur.id || '', messages: v.map(m => normalizeMsg(m)) });
+              } else if (v && typeof v === 'object') {
+                stack.push(v);
+              }
+            }
+          }
+        }
+      }
+    }
+    return convs.length ? convs : [{ title: '', messages: [] }];
+
+    function normalizeMsg(m) {
+      const role = toRole(m);
+      const textMain = normalizeContent(m.content);
+      const calls = formatAssistantCalls(m);
+      const text = [textMain, calls].filter(Boolean).join(textMain && calls ? '\n' : '');
+      const model = m.model || m.provider || m.meta?.model || m.response?.model || '';
+      const created = m.created || m.created_at || m.timestamp || undefined;
+      return { role, content: text, model, id: m.id, created, name: m.name };
+    }
+  }
+
+  function extractConversations(root) {
+    if (isORPG(root)) return extractConversationsORPG(root);
+    return extractConversationsGeneric(root);
+  }
+
+  function humanTime(val) {
+    try {
+      if (!val) return '';
+      let d;
+      if (typeof val === 'number') {
+        d = new Date(val > 1e12 ? val : val * 1000);
+      } else {
+        d = new Date(val);
+      }
+      if (isNaN(d.getTime())) return '';
+      const pad = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch { return ''; }
+  }
+
+  function render() {
+    if (!parsed) { out.innerHTML = '<div class="warn">Drop an export JSON to render.</div>'; return; }
+    const convs = extractConversations(parsed);
+
+    const html = convs.map((c, idx) => {
+      const title = c.title || (convs.length > 1 ? `Conversation ${idx+1}` : '');
+      const msgs = (c.messages || []).filter(m => {
+        const role = (m.role || '').toLowerCase();
+        if (role === 'system' && !showSystem.checked) return false;
+        if ((role === 'tool' || role === 'function') && !showTools.checked) return false;
+        return true;
+      }).map(m => {
+        const role = (m.role || 'assistant').toLowerCase();
+        let cls = 'msg';
+        if (['assistant','ai'].includes(role)) cls += ' assistant';
+        else if (['user','human'].includes(role)) cls += ' user';
+        else if (role === 'system') cls += ' system';
+        else if (role === 'tool' || role === 'function') cls += ' tool';
+
+        const text = normalizeContent(m.content);
+        const metaBits = [];
+        const model = m.model || m.provider || m.meta?.model || m.response?.model;
+        if (model) metaBits.push(`model: ${model}`);
+        if (m.name) metaBits.push(`name: ${m.name}`);
+        if (m.tool_call_id) metaBits.push(`tool_call: ${m.tool_call_id}`);
+        if (m.id) metaBits.push(`id: ${m.id}`);
+        const t = m.created ?? m.created_at ?? m.timestamp;
+        const ht = humanTime(t);
+        if (ht) metaBits.push(`time: ${ht}`);
+
+        const pills = metaBits.map(x => `<span class="pill">${escapeHtml(x)}</span>`).join(' ');
+        return `
+          <div class="${cls}">
+            <div class="role">${escapeHtml(role)}</div>
+            <div class="body">
+              <div class="content" style="white-space:${wrapLong.checked?'pre-wrap':'pre'}">${escapeHtml(text || '')}</div>
+              <div class="meta ${showMeta.checked ? '' : 'hidden'}" style="margin-top:6px">${pills}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      return `
+        <section class="conv">
+          ${title ? `<h3 class="title">${escapeHtml(title)}</h3>` : ''}
+          ${msgs || '<div class="warn">No messages found.</div>'}
+        </section>
+      `;
+    }).join('');
+
+    out.innerHTML = html || '<div class="warn">No conversations/messages detected in this JSON.</div>';
+  }
+
+  function escapeHtml(s) {
+    return (s ?? '').toString()
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;');
+  }
+
+  function toMarkdown() {
+    if (!parsed) return '';
+    const convs = extractConversations(parsed);
+    const sections = [];
+    convs.forEach((c, i) => {
+      const title = c.title || `Conversation ${i+1}`;
+      sections.push(`# ${title}\n`);
+      (c.messages || []).forEach(m => {
+        const role = (m.role || 'assistant').toUpperCase();
+        if (role === 'SYSTEM' && !showSystem.checked) return;
+        if ((role === 'TOOL' || role === 'FUNCTION') && !showTools.checked) return;
+        const body = normalizeContent(m.content || '');
+        if (!body) return;
+        sections.push(`## ${role}\n\n${body}\n`);
+      });
+      sections.push('\n---\n');
+    });
+    return sections.join('\n');
+  }
+
+  function downloadMarkdown() {
+    const md = toMarkdown();
+    if (!md) return;
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'openrouter-transcript.md';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // Initial state
+  out.innerHTML = '<div class="warn">Drop an export JSON to render.</div>';
+})();
+</script>
+
+</body>
+</html>
