@@ -76,6 +76,22 @@
     .content.md pre code { background: transparent; border: 0; padding: 0; }
     .content.md a { color: #1a73e8; text-decoration: none; }
     .content.md a:hover { text-decoration: underline; }
+
+    /* Markdown tables */
+    .content.md table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 8px 0;
+      table-layout: auto;
+    }
+    .content.md th, .content.md td {
+      border: 1px solid #e3e6ea;
+      padding: 6px 8px;
+      vertical-align: top;
+    }
+    .content.md thead th {
+      background: #f8fafc;
+    }
   </style>
 </head>
 <body>
@@ -204,14 +220,12 @@
     return extras.join('\n');
   }
 
-  // Detect ORPG 2.0 export
   function isORPG(root) {
     return root && typeof root === 'object'
       && root.messages && !Array.isArray(root.messages)
       && (root.version?.toLowerCase?.().startsWith('orpg') || root.characters);
   }
 
-  // ORPG extractor (one conversation per root->leaf branch)
   function extractConversationsORPG(root) {
     const chars = root.characters || {};
     const msgMap = root.messages || {};
@@ -284,7 +298,6 @@
     return convs;
   }
 
-  // Generic extractor
   function extractConversationsGeneric(root) {
     const convs = [];
 
@@ -446,17 +459,21 @@
       .replaceAll('>','&gt;');
   }
 
-  // Minimal, safe Markdown renderer (headings, lists, code, links, emphasis).
+  // Minimal, safe Markdown renderer with tables.
   function mdToHtmlSafe(src) {
     if (!src) return '';
-    // Normalize newlines
     let s = String(src).replace(/\r\n?/g, '\n');
 
-    // Escape HTML first (we'll only add safe tags below)
+    // Escape HTML first
     s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-    // Fenced code blocks ```lang\n...\n```
-    s = s.replace(/```(?:[^\n]*)\n([\s\S]*?)```/g, (m, code) => `<pre><code>${code}</code></pre>`);
+    // Extract fenced code blocks and protect them with placeholders
+    const codeBlocks = [];
+    s = s.replace(/```(?:[^\n]*)\n([\s\S]*?)```/g, (m, code) => {
+      const idx = codeBlocks.length;
+      codeBlocks.push(`<pre><code>${code}</code></pre>`);
+      return `\u0000CODEBLOCK${idx}\u0000`;
+    });
 
     // Headings
     s = s.replace(/^###### (.*)$/gm, '<h6>$1</h6>')
@@ -471,6 +488,9 @@
 
     // Lists (simple, single-level)
     s = listify(s);
+
+    // Tables (GitHub-style: header | divider | rows)
+    s = tablesify(s);
 
     // Inline code
     s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
@@ -487,14 +507,17 @@
       return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${text}</a>`;
     });
 
-    // Paragraphs (convert loose text blocks to <p>, keep existing blocks as-is)
+    // Paragraphs
     s = s.split(/\n{2,}/).map(block => {
       const trimmed = block.trim();
       if (!trimmed) return '';
-      if (/^<(h\d|ul|ol|pre|hr|blockquote)/.test(trimmed)) return trimmed;
-      if (trimmed.includes('<li>')) return trimmed; // list blocks already wrapped
+      if (/^<(h\d|ul|ol|pre|hr|blockquote|table)/.test(trimmed)) return trimmed;
+      if (trimmed.includes('<li>')) return trimmed;
       return `<p>${trimmed.replace(/\n/g, '<br>')}</p>`;
     }).join('\n');
+
+    // Restore code blocks
+    s = s.replace(/\u0000CODEBLOCK(\d+)\u0000/g, (_, i) => codeBlocks[+i]);
 
     return s;
   }
@@ -522,6 +545,98 @@
     }
     if (inUl) out.push('</ul>');
     if (inOl) out.push('</ol>');
+    return out.join('\n');
+  }
+
+  function tablesify(s) {
+    const lines = s.split('\n');
+    const out = [];
+    let i = 0;
+
+    function isDivider(line) {
+      if (!line) return false;
+      const t = line.trim();
+      if (!t.includes('|')) return false;
+      const cells = stripOuterPipes(t).split('|').map(c => c.trim());
+      if (!cells.length) return false;
+      // Each cell must be --- with optional colons for alignment
+      return cells.every(c => /^:?-{3,}:?$/.test(c));
+    }
+
+    function stripOuterPipes(str) {
+      return str.replace(/^\s*\|/, '').replace(/\|\s*$/, '');
+    }
+
+    function splitRow(line) {
+      return stripOuterPipes(line).split('|').map(c => c.trim());
+    }
+
+    function alignsFrom(dividerCells) {
+      return dividerCells.map(c => {
+        const left = c.startsWith(':');
+        const right = c.endsWith(':');
+        if (left && right) return 'center';
+        if (right) return 'right';
+        if (left) return 'left';
+        return '';
+      });
+    }
+
+    function isRow(line) {
+      if (!line) return false;
+      if (!line.includes('|')) return false;
+      // Stop at HTML block starts to avoid mixing
+      if (/^\s*</.test(line)) return false;
+      return true;
+    }
+
+    while (i < lines.length) {
+      const header = lines[i];
+      const divider = lines[i + 1];
+
+      if (header && header.includes('|') && isDivider(divider)) {
+        const headerCells = splitRow(header);
+        const dividerCells = splitRow(divider);
+        const alignments = alignsFrom(dividerCells);
+        let j = i + 2;
+        const bodyRows = [];
+        while (j < lines.length && isRow(lines[j])) {
+          const rowCells = splitRow(lines[j]);
+          bodyRows.push(rowCells);
+          j++;
+        }
+
+        const colCount = Math.max(headerCells.length, ...bodyRows.map(r => r.length), alignments.length);
+        function cellAlign(idx) {
+          return alignments[idx] || '';
+        }
+        function cellTag(tag, content, idx) {
+          const align = cellAlign(idx);
+          const attr = align ? ` align="${align}"` : '';
+          return `<${tag}${attr}>${content}</${tag}>`;
+        }
+
+        const thead = `<thead><tr>${
+          headerCells.map((c, idx) => cellTag('th', c || '', idx)).join('')
+          + (headerCells.length < colCount ? Array.from({length: colCount - headerCells.length}, (_,k)=>cellTag('th','', headerCells.length+k)).join('') : '')
+        }</tr></thead>`;
+
+        const tbody = `<tbody>${
+          bodyRows.map(r => `<tr>${
+            r.map((c, idx) => cellTag('td', c || '', idx)).join('')
+            + (r.length < colCount ? Array.from({length: colCount - r.length}, (_,k)=>cellTag('td','', r.length+k)).join('') : '')
+          }</tr>`).join('')
+        }</tbody>`;
+
+        out.push(`<table>${thead}${tbody}</table>`);
+        i = j; // continue after the table
+        continue;
+      }
+
+      out.push(lines[i]);
+      i++;
+    }
+
     return out.join('\n');
   }
 
