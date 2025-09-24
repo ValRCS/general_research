@@ -92,6 +92,9 @@
     .content.md thead th {
       background: #f8fafc;
     }
+
+    /* URL loader hint */
+    .info { color: #333; font-size: 12px; margin-top: 6px;}
   </style>
 </head>
 <body>
@@ -110,6 +113,7 @@
 
 <main id="out">
   <div class="warn">This is a local viewer. No data is uploaded.</div>
+  <div class="info" id="urlInfo"></div>
 </main>
 
 <input type="file" id="file" accept="application/json" hidden>
@@ -125,6 +129,7 @@
   const wrapLong   = document.getElementById('wrapLong');
   const renderMd   = document.getElementById('renderMd');
   const exportMd   = document.getElementById('exportMd');
+  const urlInfo    = document.getElementById('urlInfo');
 
   drop.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', e => handleFiles(e.target.files));
@@ -141,6 +146,8 @@
   exportMd.addEventListener('click', () => downloadMarkdown());
 
   let parsed;
+  let currentFetchAbort = null;
+  const MAX_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB soft limit
 
   function handleFiles(files) {
     if (!files || !files.length) return;
@@ -150,6 +157,7 @@
       try {
         parsed = JSON.parse(reader.result);
         exportMd.disabled = false;
+        urlInfo.textContent = '';
         render();
       } catch (err) {
         out.innerHTML = '<div class="warn">Failed to parse JSON: ' + escapeHtml(err.message) + '</div>';
@@ -157,6 +165,71 @@
       }
     };
     reader.readAsText(f);
+  }
+
+  async function loadFromUrl(u) {
+    try {
+      const url = new URL(u, location.href);
+      if (!/^https?:$/.test(url.protocol)) {
+        throw new Error('Only http(s) URLs are allowed.');
+      }
+      if (currentFetchAbort) currentFetchAbort.abort();
+      const controller = new AbortController();
+      currentFetchAbort = controller;
+
+      urlInfo.textContent = `Loading from URL: ${url.toString()}`;
+      out.innerHTML = '<div class="warn">Loading JSON from URL…</div>';
+
+      const res = await fetch(url.toString(), {
+        method: 'GET',
+        mode: 'cors',
+        credentials: 'omit',
+        cache: 'no-store',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json, text/plain;q=0.9, */*;q=0.8' }
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+
+      const len = +(res.headers.get('Content-Length') || 0);
+      if (len && len > MAX_SIZE_BYTES) {
+        throw new Error(`File too large: ${(len/1024/1024).toFixed(1)} MB (limit ${(MAX_SIZE_BYTES/1024/1024).toFixed(0)} MB).`);
+      }
+
+      let text = await res.text();
+
+      // Strip BOM and any leading noise before the first JSON bracket
+      text = text.replace(/^\uFEFF/, '');
+      const first = text.search(/[{\[]/);
+      if (first > 0) text = text.slice(first);
+
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        // Try to salvage by trimming trailing noise after last bracket
+        const last = text.lastIndexOf('}');
+        const lastArr = text.lastIndexOf(']');
+        const end = Math.max(last, lastArr);
+        if (end > 0) {
+          data = JSON.parse(text.slice(0, end + 1));
+        } else {
+          throw e;
+        }
+      }
+
+      parsed = data;
+      exportMd.disabled = false;
+      render();
+      urlInfo.textContent = `Loaded from URL: ${url.toString()}`;
+    } catch (err) {
+      out.innerHTML = '<div class="warn">Failed to load URL: ' + escapeHtml(err.message) + '</div>';
+    } finally {
+      currentFetchAbort = null;
+    }
   }
 
   function normalizeContent(content) {
@@ -459,7 +532,7 @@
       .replaceAll('>','&gt;');
   }
 
-  // Minimal, safe Markdown renderer with tables.
+  // Markdown renderer with tables.
   function mdToHtmlSafe(src) {
     if (!src) return '';
     let s = String(src).replace(/\r\n?/g, '\n');
@@ -467,7 +540,7 @@
     // Escape HTML first
     s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-    // Extract fenced code blocks and protect them with placeholders
+    // Extract fenced code blocks
     const codeBlocks = [];
     s = s.replace(/```(?:[^\n]*)\n([\s\S]*?)```/g, (m, code) => {
       const idx = codeBlocks.length;
@@ -486,10 +559,10 @@
     // Horizontal rules
     s = s.replace(/^\s*([-*_])\1\1[\1\s]*$/gm, '<hr>');
 
-    // Lists (simple, single-level)
+    // Lists
     s = listify(s);
 
-    // Tables (GitHub-style: header | divider | rows)
+    // Tables
     s = tablesify(s);
 
     // Inline code
@@ -559,7 +632,6 @@
       if (!t.includes('|')) return false;
       const cells = stripOuterPipes(t).split('|').map(c => c.trim());
       if (!cells.length) return false;
-      // Each cell must be --- with optional colons for alignment
       return cells.every(c => /^:?-{3,}:?$/.test(c));
     }
 
@@ -585,7 +657,6 @@
     function isRow(line) {
       if (!line) return false;
       if (!line.includes('|')) return false;
-      // Stop at HTML block starts to avoid mixing
       if (/^\s*</.test(line)) return false;
       return true;
     }
@@ -607,9 +678,7 @@
         }
 
         const colCount = Math.max(headerCells.length, ...bodyRows.map(r => r.length), alignments.length);
-        function cellAlign(idx) {
-          return alignments[idx] || '';
-        }
+        function cellAlign(idx) { return alignments[idx] || ''; }
         function cellTag(tag, content, idx) {
           const align = cellAlign(idx);
           const attr = align ? ` align="${align}"` : '';
@@ -629,7 +698,7 @@
         }</tbody>`;
 
         out.push(`<table>${thead}${tbody}</table>`);
-        i = j; // continue after the table
+        i = j;
         continue;
       }
 
@@ -674,7 +743,14 @@
     URL.revokeObjectURL(url);
   }
 
-  out.innerHTML = '<div class="warn">Drop an export JSON to render.</div>';
+  // Auto-load ?url=... if present
+  document.addEventListener('DOMContentLoaded', () => {
+    const params = new URLSearchParams(location.search);
+    const u = params.get('url');
+    if (u) loadFromUrl(u);
+  });
+
+  out.innerHTML = '<div class="warn">Drop an export JSON to render, or pass ?url=… in the address bar.</div>';
 })();
 </script>
 
